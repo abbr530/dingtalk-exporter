@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>钉钉聊天记录导出工具</title>
+    <link rel="stylesheet" href="/static/style.css?v=20260417j">
+</head>
+<body>
+    <div id="app">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-left">
+                <h1 class="logo">钉钉聊天记录</h1>
+                <span class="sync-status" id="syncStatus">加载中...</span>
+            </div>
+            <div class="header-right">
+                <div class="search-box">
+                    <input type="text" id="searchInput" placeholder="搜索消息..." autocomplete="off">
+                    <button id="searchBtn" class="btn-icon" title="搜索">
+                        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85zm-5.242.156a5 5 0 1 1 0-10 5 5 0 0 1 0 10z"/></svg>
+                    </button>
+                </div>
+                <button id="syncBtn" class="btn btn-primary" title="手动同步">手动同步</button>
+                <button id="exportBtn" class="btn btn-secondary" title="导出列表">导出</button>
+            </div>
+        </header>
+
+        <!-- Main layout -->
+        <div class="main-layout">
+            <!-- Sidebar: Conversation list -->
+            <aside class="sidebar" id="sidebar">
+                <div class="sidebar-header">
+                    <span>会话列表</span>
+                    <span class="conv-count" id="convCount"></span>
+                </div>
+                <div class="sidebar-toolbar">
+                    <div class="sidebar-search">
+                        <input type="text" id="convSearchInput" placeholder="搜索会话..." autocomplete="off">
+                    </div>
+                    <div class="sidebar-tabs" id="sidebarTabs">
+                        <button class="sidebar-tab active" data-filter="all">全部</button>
+                        <button class="sidebar-tab" data-filter="group">群聊</button>
+                        <button class="sidebar-tab" data-filter="single">单聊</button>
+                    </div>
+                </div>
+                <div class="conv-list" id="convList">
+                    <div class="loading">加载中...</div>
+                </div>
+            </aside>
+
+            <!-- Content area -->
+            <main class="content" id="content">
+                <div class="empty-state" id="emptyState">
+                    <p>请从左侧选择一个会话</p>
+                </div>
+
+                <!-- Message view -->
+                <div class="message-view" id="messageView" style="display:none">
+                    <div class="message-header" id="messageHeader">
+                        <h2 id="convTitle"></h2>
+                        <span class="conv-meta" id="convMeta"></span>
+                    </div>
+                    <div class="message-list" id="messageList"></div>
+                    <div class="message-pagination" id="messagePagination"></div>
+                </div>
+
+                <!-- Search results -->
+                <div class="search-view" id="searchView" style="display:none">
+                    <div class="search-header">
+                        <h2 id="searchTitle">搜索结果</h2>
+                        <button class="btn btn-secondary" id="searchCloseBtn">关闭</button>
+                    </div>
+                    <div class="message-list" id="searchResults"></div>
+                </div>
+            </main>
+        </div>
+
+        <!-- Export modal -->
+        <div class="modal" id="exportModal" style="display:none">
+            <div class="modal-content modal-wide">
+                <div class="modal-header">
+                    <h3>数据导出</h3>
+                    <button class="modal-close" id="exportModalClose">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <!-- Tab switcher -->
+                    <div class="export-tabs">
+                        <button class="export-tab active" data-tab="select">勾选导出</button>
+                        <button class="export-tab" data-tab="files">已导出文件</button>
+                    </div>
+
+                    <!-- Tab: select conversations -->
+                    <div class="export-panel" id="exportPanelSelect">
+                        <div class="export-toolbar">
+                            <div class="export-toolbar-left">
+                                <label class="checkbox-label">
+                                    <input type="checkbox" id="selectAllCbs"> 全选
+                                </label>
+                                <span id="selectedCount" style="font-size:13px;color:#888;margin-left:8px">已选 0 个</span>
+                                <div class="sidebar-tabs" id="exportFilterTabs" style="margin-left:12px">
+                                    <button class="sidebar-tab active" data-filter="all">全部</button>
+                                    <button class="sidebar-tab" data-filter="group">群聊</button>
+                                    <button class="sidebar-tab" data-filter="single">单聊</button>
+                                </div>
+                            </div>
+                            <div class="export-toolbar-right">
+                                <input type="text" id="exportSearchInput" placeholder="搜索会话..." style="padding:4px 8px;border:1px solid #ddd;border-radius:4px;font-size:13px;width:180px">
+                                <select id="exportTimeRange" style="padding:4px 8px;border:1px solid #ddd;border-radius:4px;font-size:13px">
+                                    <option value="0">全部</option>
+                                    <option value="3">近3个月</option>
+                                    <option value="6">近6个月</option>
+                                    <option value="12">近1年</option>
+                                    <option value="24">近2年</option>
+                                </select>
+                                <button class="btn btn-primary" id="exportSelectedBtn" disabled>导出选中会话</button>
+                            </div>
+                        </div>
+                        <div class="export-conv-list" id="exportConvList">
+                            <div class="loading">加载会话列表...</div>
+                        </div>
+                    </div>
+
+                    <!-- Tab: exported files -->
+                    <div class="export-panel" id="exportPanelFiles" style="display:none">
+                        <div style="margin-bottom:12px">
+                            <button class="btn btn-secondary" id="fullExportBtn">全量导出所有会话</button>
+                            <span id="exportProgress" style="font-size:13px;color:#888;margin-left:8px"></span>
+                        </div>
+                        <div id="exportList">
+                            <div class="loading">加载中...</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Image lightbox -->
+        <div class="lightbox" id="lightbox" style="display:none">
+            <button class="lightbox-close" id="lightboxClose">&times;</button>
+            <img id="lightboxImg" src="" alt="">
+        </div>
+    </div>
+
+    <script src="/static/app.js?v=20260417j"></script>
+</body>
+</html>

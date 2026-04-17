@@ -1,0 +1,27 @@
+# Runtime data (contains decrypted databases, exports, logs — all private)
+data/
+logs/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# dingwave binary — download from https://github.com/p1g3/dingwave/releases
+tools/dingwave.exe
+
+# Environment
+.env
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
