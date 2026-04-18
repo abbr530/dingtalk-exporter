@@ -10,6 +10,7 @@ const state = {
     totalMessages: 0,
     convOffset: 0,
     convLimit: 50,
+    myUid: '',
 };
 
 // --- API helpers ---
@@ -221,7 +222,7 @@ async function loadMessages() {
 
 function renderMessages(messages) {
     const list = document.getElementById('messageList');
-    const myUid = _myUid;
+    const myUid = state.myUid;
 
     // Build HTML with date separators
     let html = '';
@@ -615,6 +616,11 @@ function openLightbox(src) {
 // --- Event bindings ---
 
 function init() {
+    // Fetch current user UID
+    apiGet('/api/config').then(data => {
+        state.myUid = String(data.user_uid || '');
+    }).catch(() => {});
+
     // Load conversations
     loadConversations(true);
     loadSyncStatus();
