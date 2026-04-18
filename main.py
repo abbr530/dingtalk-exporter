@@ -30,7 +30,21 @@ logger = logging.getLogger(__name__)
 if __name__ == "__main__":
     logger.info(f"Starting DingTalk Exporter on {config.WEB_HOST}:{config.WEB_PORT}")
     logger.info(f"Data directory: {config.DINGTALK_DATA_DIR}")
+    logger.info(f"dingwave path: {config.DINGWAVE_PATH}")
     logger.info(f"Sync interval: every {config.SYNC_INTERVAL_HOURS} hours")
+
+    # Startup validation: warn early about missing components
+    if not os.path.isfile(config.DINGWAVE_PATH):
+        logger.warning(
+            f"dingwave binary not found at: {config.DINGWAVE_PATH}\n"
+            f"Please download from https://github.com/p1g3/dingwave/releases\n"
+            f"Decryption and sync will fail until this is resolved."
+        )
+    if not os.path.exists(config.ENCRYPTED_DB):
+        logger.warning(
+            f"DingTalk database not found at: {config.ENCRYPTED_DB}\n"
+            f"Make sure DingTalk desktop client is installed and logged in on this machine."
+        )
 
     uvicorn.run(
         app,

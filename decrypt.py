@@ -51,6 +51,15 @@ def copy_encrypted_db(retry_count=None, retry_delay=None):
 
 def decrypt_database(encrypted_db_path=None, output_path=None):
     """Decrypt the database using dingwave CLI tool."""
+    # Validate dingwave binary exists
+    if not os.path.isfile(config.DINGWAVE_PATH):
+        raise FileNotFoundError(
+            f"dingwave binary not found at: {config.DINGWAVE_PATH}\n"
+            f"Please download it from https://github.com/p1g3/dingwave/releases\n"
+            f"and place it in the tools/ directory.\n"
+            f"Expected: tools/dingwave.exe (Windows) or tools/dingwave (Linux/Mac)"
+        )
+
     if encrypted_db_path is None:
         encrypted_db_path = copy_encrypted_db()
     if output_path is None:

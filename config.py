@@ -1,4 +1,5 @@
 import os
+import sys
 import logging
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -9,7 +10,7 @@ logger = logging.getLogger(__name__)
 def _detect_dingtalk_user():
     """Auto-detect DingTalk user data directory and UID.
 
-    Scans %APPDATA%\\DingTalk\\ for *_v2 directories.
+    Scans multiple possible DingTalk data directories for *_v2 (or *_v3) folders.
     Returns (data_dir, uid) or (None, None) if not found.
 
     Override with environment variables:
@@ -24,26 +25,53 @@ def _detect_dingtalk_user():
         logger.info(f"Using config from environment: UID={env_uid}")
         return env_dir, env_uid
 
-    # Scan for *_v2 directories under %APPDATA%\DingTalk\
+    # Multiple possible DingTalk base directories (ordered by likelihood)
+    search_bases = []
     appdata = os.environ.get("APPDATA", "")
-    if not appdata:
-        return None, None
+    local_appdata = os.environ.get("LOCALAPPDATA", "")
+    userprofile = os.environ.get("USERPROFILE", "")
 
-    dingtalk_base = os.path.join(appdata, "DingTalk")
-    if not os.path.isdir(dingtalk_base):
-        return None, None
+    if appdata:
+        search_bases.append(os.path.join(appdata, "DingTalk"))
+    if local_appdata and local_appdata != appdata:
+        search_bases.append(os.path.join(local_appdata, "DingTalk"))
+    if userprofile:
+        search_bases.append(os.path.join(userprofile, "AppData", "Roaming", "DingTalk"))
+        search_bases.append(os.path.join(userprofile, "AppData", "Local", "DingTalk"))
+        search_bases.append(os.path.join(userprofile, "DingTalk"))
 
-    # Find all *_v2 user directories that have a database file
+    # macOS and Linux paths
+    home = os.path.expanduser("~")
+    if sys.platform == "darwin":
+        search_bases.append(os.path.join(home, "Library", "Application Support", "DingTalk"))
+    elif sys.platform.startswith("linux"):
+        search_bases.append(os.path.join(home, ".config", "DingTalk"))
+        search_bases.append(os.path.join(home, ".local", "share", "DingTalk"))
+
+    # Deduplicate while preserving order
+    seen = set()
+    unique_bases = []
+    for b in search_bases:
+        b_norm = os.path.normcase(os.path.normpath(b))
+        if b_norm not in seen:
+            seen.add(b_norm)
+            unique_bases.append(b)
+    search_bases = unique_bases
+
+    # Find all *_v2 / *_v3 user directories that have a database file
     v2_dirs = []
-    for entry in os.listdir(dingtalk_base):
-        if entry.endswith("_v2"):
-            full_path = os.path.join(dingtalk_base, entry)
-            if os.path.isdir(full_path):
-                db_file = os.path.join(full_path, "DBFiles", "dingtalk.db")
-                if os.path.exists(db_file):
-                    uid = entry.replace("_v2", "")
-                    mtime = os.path.getmtime(db_file)
-                    v2_dirs.append((uid, full_path, mtime))
+    for dingtalk_base in search_bases:
+        if not os.path.isdir(dingtalk_base):
+            continue
+        for entry in os.listdir(dingtalk_base):
+            if entry.endswith(("_v2", "_v3")):
+                full_path = os.path.join(dingtalk_base, entry)
+                if os.path.isdir(full_path):
+                    db_file = os.path.join(full_path, "DBFiles", "dingtalk.db")
+                    if os.path.exists(db_file):
+                        uid = entry.rsplit("_v", 1)[0]
+                        mtime = os.path.getmtime(db_file)
+                        v2_dirs.append((uid, full_path, mtime))
 
     if not v2_dirs:
         return None, None
@@ -65,6 +93,41 @@ def _detect_dingtalk_user():
     return path, uid
 
 
+def _detect_dingwave():
+    """Auto-detect the dingwave binary in the tools/ directory.
+
+    Checks multiple possible filenames to handle:
+    - Platform differences (dingwave.exe vs dingwave)
+    - Users who rename or download with different names
+    """
+    tools_dir = os.path.join(PROJECT_DIR, "tools")
+    candidates = []
+
+    if sys.platform == "win32":
+        candidates = ["dingwave.exe", "dingwave"]
+    else:
+        candidates = ["dingwave", "dingwave.exe"]
+
+    # Check exact names first
+    for name in candidates:
+        full = os.path.join(tools_dir, name)
+        if os.path.isfile(full):
+            return full
+
+    # Fallback: find any executable-like file in tools/ with 'dingwave' in name
+    if os.path.isdir(tools_dir):
+        for f in os.listdir(tools_dir):
+            lower = f.lower()
+            if "dingwave" in lower and not lower.endswith((".md", ".txt", ".zip", ".tar", ".gz")):
+                full = os.path.join(tools_dir, f)
+                if os.path.isfile(full):
+                    logger.info(f"Found dingwave binary: {f}")
+                    return full
+
+    # Return default (will fail later with clear message)
+    return os.path.join(tools_dir, candidates[0])
+
+
 # --- DingTalk data paths ---
 # Auto-detection is tried first. If it fails (e.g. DingTalk not installed),
 # set environment variables or edit the defaults below.
@@ -82,8 +145,8 @@ USER_UID = _detected_uid or "<YOUR_UID>"
 ENCRYPTED_DB_DIR = os.path.join(DINGTALK_DATA_DIR, "DBFiles")
 ENCRYPTED_DB = os.path.join(ENCRYPTED_DB_DIR, "dingtalk.db")
 
-# dingwave tool
-DINGWAVE_PATH = os.path.join(PROJECT_DIR, "tools", "dingwave.exe")
+# dingwave tool — auto-detected
+DINGWAVE_PATH = _detect_dingwave()
 
 # Sync settings
 SYNC_INTERVAL_HOURS = 4
