@@ -261,6 +261,17 @@ body {
     margin-bottom: 2px;
     padding-left: 4px;
 }
+.msg-ding-badge {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: rgba(52, 152, 219, 0.12);
+    color: var(--primary);
+    font-size: 11px;
+    font-weight: 600;
+    vertical-align: middle;
+}
 .msg-item .msg-bubble {
     padding: 10px 14px;
     border-radius: 8px;
@@ -358,9 +369,10 @@ body {
     border-left: 3px solid var(--primary);
     padding-left: 8px;
     color: #555;
+    word-break: break-word;
+    white-space: pre-wrap;
     max-height: 200px;
     overflow-y: auto;
-    word-break: break-word;
 }
 
 /* Card messages */
@@ -374,6 +386,53 @@ body {
     white-space: pre-wrap;
     max-height: 200px;
     overflow-y: auto;
+}
+
+.msg-audio {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 260px;
+}
+.msg-audio-player {
+    width: 100%;
+    max-width: 360px;
+}
+.msg-audio-meta {
+    font-size: 12px;
+    color: var(--text-light);
+}
+.msg-audio-transcript {
+    padding: 8px 10px;
+    background: rgba(0,0,0,0.03);
+    border-radius: 6px;
+    white-space: pre-wrap;
+}
+
+.msg-reply {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.msg-reply-source {
+    padding: 8px 10px;
+    border-left: 3px solid var(--primary);
+    background: rgba(52, 152, 219, 0.06);
+    border-radius: 4px;
+}
+.msg-reply-name {
+    font-size: 12px;
+    color: var(--primary);
+    margin-bottom: 4px;
+    font-weight: 600;
+}
+.msg-reply-preview {
+    font-size: 13px;
+    color: #555;
+    white-space: pre-wrap;
+}
+.msg-reply-body {
+    white-space: pre-wrap;
 }
 
 /* Pagination */

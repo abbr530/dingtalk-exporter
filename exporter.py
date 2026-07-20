@@ -235,6 +235,7 @@ def _serialize_message(msg):
         "sender_name": msg.get("sender_name"),
         "content_type": msg.get("content_type"),
         "content_type_name": msg.get("content_type_name"),
+        "message_subtype": msg.get("message_subtype"),
         "text": msg.get("text", ""),
         "created_at": msg.get("created_at"),
         "created_at_str": msg.get("created_at_str"),
@@ -244,6 +245,12 @@ def _serialize_message(msg):
     # Include image info for image messages
     if msg.get("image_info"):
         result["image_info"] = msg["image_info"]
+    if msg.get("audio_info"):
+        result["audio_info"] = msg["audio_info"]
+    if msg.get("quote_info"):
+        result["quote_info"] = msg["quote_info"]
+    if msg.get("is_ding"):
+        result["is_ding"] = msg["is_ding"]
     # Include attachment export path if processed
     if msg.get("attachment_export_path"):
         result["attachment_export_path"] = msg["attachment_export_path"]

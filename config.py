@@ -518,6 +518,7 @@ CONTENT_TYPE_APPROVAL = 1400
 CONTENT_TYPE_NAMES = {
     1: "文本",
     2: "图片",
+    3: "语音",
     4: "文件",
     102: "系统消息",
     104: "系统通知",

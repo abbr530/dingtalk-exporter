@@ -2,6 +2,8 @@ import json
 import os
 import sqlite3
 import logging
+import re
+from urllib.parse import parse_qs, unquote, urlparse
 from datetime import datetime
 from typing import Optional
 
@@ -13,6 +15,7 @@ logger = logging.getLogger(__name__)
 # Message content type constants
 MSG_TYPE_TEXT = 1
 MSG_TYPE_IMAGE = 2
+MSG_TYPE_AUDIO = 3
 MSG_TYPE_VOICE = 300
 MSG_TYPE_FILE = 501
 MSG_TYPE_RICH_TEXT = 1200
@@ -265,6 +268,7 @@ def get_messages(conn, cid, limit=50, offset=0, since_time=None, until_time=None
 
     rows = conn.execute(sql, params).fetchall()
     messages = [_parse_message(row, conn) for row in rows]
+    _mark_ding_messages(messages)
 
     return {"total": total, "messages": messages}
 
@@ -300,6 +304,7 @@ def get_new_messages(conn, since_time, cid=None):
 
     # Sort by time
     messages.sort(key=lambda m: m["created_at"])
+    _mark_ding_messages(messages)
     return messages
 
 
@@ -338,33 +343,69 @@ def _parse_message(row, conn):
     content_type = row["contentType"]
     content_raw = row["content"] or ""
     attachments_raw = row["attachments"] or ""
+    row_extension_data = _parse_json_dict(row["extension"])
 
     # Parse content JSON
-    content_data = {}
-    try:
-        content_data = json.loads(content_raw) if content_raw else {}
-    except json.JSONDecodeError:
+    content_data = _parse_json_dict(content_raw)
+    if not content_data and content_raw:
         content_data = {"text": content_raw}
 
     # Extract text content based on content type
     text = ""
+    message_subtype = ""
+    quote_info = None
     if content_type == MSG_TYPE_TEXT:
         text = content_data.get("text", "")
+        if row_extension_data.get("BIType") == "confirm_ding_system_msg":
+            message_subtype = "ding_status"
     elif content_type == MSG_TYPE_IMAGE:
-        text = "[图片]"
+        if _is_dingtalk_emoji(content_data):
+            text = "[钉钉表情]"
+            message_subtype = "emoji"
+        else:
+            text = "[图片]"
+    elif content_type == MSG_TYPE_AUDIO:
+        text = _extract_audio_text(content_data, row_extension_data)
+        message_subtype = "voice"
     elif content_type == MSG_TYPE_VOICE:
-        text = "[语音]"
+        announcement_text = _extract_announcement_text(content_data)
+        if announcement_text:
+            text = announcement_text
+            message_subtype = "announcement"
+        else:
+            report_text = _extract_report_text(content_data)
+            if report_text:
+                text = report_text
+                message_subtype = "report"
+            else:
+                text = "[语音]"
+                message_subtype = "voice"
+    elif content_type in (102, 104):
+        text = _extract_system_message_text(content_data, row_extension_data)
+        if text.startswith("[公告]"):
+            message_subtype = "announcement"
+        elif row_extension_data.get("BIType") == "confirm_ding_system_msg" or "DING" in text:
+            message_subtype = "ding_status"
     elif content_type == MSG_TYPE_FILE:
         text = "[文件]"
     elif content_type in (MSG_TYPE_RICH_TEXT, 1201, 1202):
-        # Rich text / interactive buttons / system tips
-        text = _extract_rich_text(content_data)
+        quote_info = _extract_reply_info(content_data, row_extension_data, conn)
+        if quote_info:
+            text = quote_info.get("reply_text", "")
+            message_subtype = "reply"
+        else:
+            # Rich text / interactive buttons / system tips
+            text = _extract_rich_text(content_data)
     elif content_type == MSG_TYPE_QUOTE:
         # Quote / re-edit messages
         text = _extract_quote_text(content_data)
     elif content_type in (2900, 2950):
         # Interactive cards / mini-app cards
-        text = _extract_card_text(content_data)
+        message_subtype = _detect_card_subtype(content_data, row_extension_data)
+        if message_subtype == "report":
+            text = _extract_report_card_text(conn, content_data, row_extension_data)
+        else:
+            text = _extract_card_text(content_data, row_extension_data)
     elif content_type == MSG_TYPE_APPROVAL:
         # Approval messages
         text = _extract_approval_text(content_data)
@@ -403,20 +444,33 @@ def _parse_message(row, conn):
         "sender_name": _clean_surrogates(sender_name),
         "content_type": content_type,
         "content_type_name": config.CONTENT_TYPE_NAMES.get(content_type, f"未知({content_type})"),
+        "message_subtype": message_subtype,
         "text": text,
         "created_at": row["createdAt"],
         "created_at_str": _format_timestamp(row["createdAt"]),
         "recall_status": row["recallStatus"],
         "at_ids": at_ids,
         "attachments": attachment_list,
+        "is_ding": False,
     }
+
+    if quote_info:
+        msg["quote_info"] = quote_info
 
     # For images, add the local file path from im_image_info
     # Also for quote/rich-text messages that contain [图片] markers
     if content_type == MSG_TYPE_IMAGE:
         msg["image_info"] = _get_image_info(conn, row["cid"], row["mid"], content_data)
     elif "[图片]" in text:
-        msg["image_info"] = _get_image_info(conn, row["cid"], row["mid"], content_data)
+        msg["image_info"] = _get_message_image_info(
+            conn, row["cid"], row["mid"], content_data
+        )
+    if content_type == MSG_TYPE_AUDIO or (
+        content_type == MSG_TYPE_VOICE and message_subtype == "voice"
+    ):
+        audio_info = _get_audio_info(content_data, row_extension_data)
+        if audio_info:
+            msg["audio_info"] = audio_info
 
     return msg
 
@@ -541,6 +595,152 @@ def _parse_attachments(attachments_raw, content_data, content_type, mid):
     return attachments
 
 
+def _parse_json_dict(raw):
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
+def _safe_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _is_dingtalk_emoji(content_data):
+    ext = _parse_json_dict(content_data.get("extension"))
+    url = content_data.get("url", "") or ""
+    return bool(
+        ext.get("e_id")
+        or ext.get("p_id")
+        or ext.get("pr_type")
+        or url.lower().endswith(".gif")
+    )
+
+
+def _clean_card_title(text):
+    if not text:
+        return ""
+    return re.sub(r"^\[[^\]]+\]\s*", "", text).strip()
+
+
+def _extract_announcement_text(content_data):
+    ext = _extract_ext_from_attachment(content_data)
+    if not isinstance(ext, dict):
+        return ""
+
+    is_announcement = bool(
+        ext.get("h_tl") == "公告"
+        or (
+            not ext.get("b_form")
+            and (ext.get("b_tl") or ext.get("b_content"))
+        )
+    )
+    if not is_announcement:
+        return ""
+
+    title = (ext.get("b_tl") or ext.get("title") or "").strip()
+    content = (ext.get("b_content") or ext.get("desc") or "").strip()
+    author = (ext.get("author") or "").strip()
+    pieces = []
+    if title:
+        pieces.append(f"[公告] {title}")
+    else:
+        pieces.append("[公告]")
+    if author:
+        pieces.append(f"发布者：{author}")
+    if content:
+        pieces.append(content)
+    return "\n".join(pieces).strip()
+
+
+def _extract_audio_text(content_data, row_extension_data=None):
+    row_extension_data = row_extension_data or {}
+    for key in ("asrText", "audioToText", "audioText", "text"):
+        value = row_extension_data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    audio_content = content_data.get("audioContent", {}) or {}
+    for key in ("text", "asrText", "audioToText"):
+        value = audio_content.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return "[语音消息]"
+
+
+def _extract_report_text(content_data):
+    ext = _extract_ext_from_attachment(content_data)
+    if not isinstance(ext, dict) or not ext.get("b_form"):
+        return ""
+    title = (ext.get("b_tl") or ext.get("title") or "").strip()
+    header = (ext.get("h_tl") or "日志").strip()
+    form_text = _format_report_form(ext.get("b_form"))
+    pieces = []
+    pieces.append(f"[{header}] {title}".strip())
+    if form_text:
+        pieces.append(form_text)
+    return "\n".join(piece for piece in pieces if piece).strip()
+
+
+def _format_report_form(raw_form):
+    try:
+        items = json.loads(raw_form) if isinstance(raw_form, str) else raw_form
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    if not isinstance(items, list):
+        return ""
+
+    lines = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("k", "")).strip()
+        value = str(item.get("v", "")).replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not key and not value:
+            continue
+        if value:
+            lines.append(f"{key}\n{value}" if key else value)
+        else:
+            lines.append(key)
+    return "\n\n".join(lines).strip()
+
+
+def _extract_system_message_text(content_data, row_extension_data=None):
+    row_extension_data = row_extension_data or {}
+    announcement_text = _extract_announcement_text(content_data)
+    if announcement_text:
+        return announcement_text
+
+    ext = _extract_ext_from_attachment(content_data)
+    pieces = []
+
+    def add_piece(value):
+        value = (value or "").strip()
+        if not value:
+            return
+        if value in pieces:
+            return
+        pieces.append(value)
+
+    add_piece(_clean_card_title(row_extension_data.get("biz_custom_title", "")))
+    add_piece(row_extension_data.get("biz_custom_desc", ""))
+    add_piece(ext.get("title", ""))
+    add_piece(ext.get("text", ""))
+    add_piece(ext.get("desc", ""))
+    add_piece(ext.get("searchDesc", ""))
+    add_piece(ext.get("interactiveCardLastMessage", ""))
+    add_piece(content_data.get("text", ""))
+
+    return "\n".join(pieces).strip()
+
+
 def _get_image_info(conn, cid, mid, content_data):
     """Get image file info from im_image_info table and content data.
 
@@ -593,8 +793,147 @@ def _get_image_info(conn, cid, mid, content_data):
         info["cached"] = True
         info["local_path"] = blurred
         info["src"] = img["src"]
+        return info
+
+    # Final fallback: use the remote URL directly (useful for DingTalk emoji GIFs).
+    remote_url = content_data.get("url", "") or ""
+    if remote_url.startswith(("http://", "https://")):
+        img = {
+            "file_size": 0,
+            "url": remote_url,
+            "cached": False,
+            "local_path": "",
+            "src": remote_url,
+        }
+        info["images"].append(img)
+        info["url"] = remote_url
+        info["src"] = remote_url
 
     return info
+
+
+def _get_message_image_info(conn, cid, mid, content_data):
+    info = _get_image_info(conn, cid, mid, content_data)
+    embedded_images = _extract_embedded_images(conn, cid, mid, content_data)
+    if not embedded_images:
+        return info
+
+    existing_srcs = {
+        item.get("src")
+        for item in info.get("images", [])
+        if isinstance(item, dict) and item.get("src")
+    }
+    for image in embedded_images:
+        if image.get("src") and image.get("src") not in existing_srcs:
+            info.setdefault("images", []).append(image)
+            existing_srcs.add(image.get("src"))
+
+    if info.get("images") and not info.get("src"):
+        primary = info["images"][0]
+        info["file_size"] = primary.get("file_size", 0)
+        info["url"] = primary.get("url", "")
+        info["cached"] = bool(primary.get("cached"))
+        info["local_path"] = primary.get("local_path", "")
+        info["src"] = primary.get("src", "")
+
+    return info
+
+
+def _extract_embedded_images(conn, cid, mid, content_data):
+    ext = _extract_ext_from_attachment(content_data)
+    images = []
+    payload_v2 = _parse_json_dict(ext.get("payloadV2"))
+    contents = payload_v2.get("contents", [])
+    if isinstance(contents, list):
+        for content in contents:
+            text_block = (content or {}).get("text", {})
+            items = text_block.get("items", []) if isinstance(text_block, dict) else []
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if isinstance(item, dict) and item.get("type") == "image":
+                    image = _resolve_payload_image(conn, cid, mid, item.get("data", {}))
+                    if image:
+                        images.append(image)
+
+    if images:
+        return images
+
+    payload = _parse_json_dict(ext.get("payload"))
+    items = payload.get("items", [])
+    if not isinstance(items, list):
+        return []
+    for item in items:
+        if not isinstance(item, dict) or item.get("type") != "img":
+            continue
+        value = item.get("value", {}) or {}
+        data = {"url": value.get("src", "")}
+        image = _resolve_payload_image(conn, cid, mid, data)
+        if image:
+            images.append(image)
+    return images
+
+
+def _resolve_payload_image(conn, cid, mid, data):
+    if not isinstance(data, dict):
+        return None
+    auth_media_id = (data.get("authMediaId") or "").lstrip("$").strip()
+    media_id = (data.get("url") or data.get("src") or "").replace("mediaId://", "").strip()
+
+    rows = []
+    if auth_media_id:
+        rows = conn.execute(
+            "SELECT url, local_path, size FROM im_image_info WHERE cid = ? AND url LIKE ?",
+            (cid, f"%{auth_media_id}%"),
+        ).fetchall()
+        if not rows:
+            rows = conn.execute(
+                "SELECT url, local_path, size FROM im_image_info WHERE url LIKE ? LIMIT 5",
+                (f"%{auth_media_id}%",),
+            ).fetchall()
+
+    if not rows and media_id:
+        related = _find_image_rows_by_media_id(conn, media_id)
+        if related:
+            rows = related
+
+    if rows:
+        row = rows[0]
+        local_path = row["local_path"] or ""
+        src = _local_path_to_url(local_path) if local_path and os.path.exists(local_path) else ""
+        url = row["url"] or ""
+        if not src and url.startswith(("http://", "https://")):
+            src = url
+        if src:
+            return {
+                "file_size": os.path.getsize(local_path) if local_path and os.path.exists(local_path) else 0,
+                "url": url,
+                "cached": bool(local_path and os.path.exists(local_path)),
+                "local_path": local_path,
+                "src": src,
+            }
+    return None
+
+
+def _find_image_rows_by_media_id(conn, media_id):
+    if not media_id:
+        return []
+    for table in _get_all_msg_tables():
+        try:
+            rows = conn.execute(
+                f'''SELECT cid, mid FROM "{table}" WHERE contentType = 2 AND content LIKE ? LIMIT 5''',
+                (f"%{media_id}%",),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            continue
+        for row in rows:
+            image_rows = conn.execute(
+                "SELECT url, local_path, size FROM im_image_info WHERE cid = ? AND mid = ?",
+                (row["cid"], row["mid"]),
+            ).fetchall()
+            if image_rows:
+                return image_rows
+    return []
 
 
 def _local_path_to_url(local_path):
@@ -606,6 +945,78 @@ def _local_path_to_url(local_path):
         rel = local_path[len(data_dir):]
         return "/api/attachments/" + rel.replace("\\", "/")
     return ""
+
+
+def _get_audio_info(content_data, row_extension_data=None):
+    row_extension_data = row_extension_data or {}
+    audio_content = content_data.get("audioContent", {}) or {}
+    media_id = (audio_content.get("mediaId") or "").lstrip("@")
+    filepath = audio_content.get("filepath", "") or ""
+    duration_ms = _safe_int(audio_content.get("duration"))
+    transcript = ""
+    for key in ("asrText", "audioToText", "audioText", "text"):
+        value = row_extension_data.get(key)
+        if isinstance(value, str) and value.strip():
+            transcript = value.strip()
+            break
+
+    local_path = ""
+    candidates = []
+    if filepath:
+        candidates.append(filepath)
+    if media_id:
+        audio_dir = os.path.join(config.DINGTALK_DATA_DIR, "AudioFiles")
+        for ext in (".ogg", ".amr", ".wav", ".mp3", ".m4a"):
+            candidates.append(os.path.join(audio_dir, f"{media_id}{ext}"))
+    for candidate in candidates:
+        if candidate and os.path.exists(candidate):
+            local_path = candidate
+            break
+
+    src = _local_path_to_url(local_path) if local_path else ""
+    if not src:
+        auth_media_id = (row_extension_data.get("authMediaId") or "").strip()
+        if auth_media_id:
+            src = ""
+
+    if not local_path and not transcript:
+        return {
+            "duration_ms": duration_ms,
+            "src": "",
+            "local_path": "",
+            "transcript": "",
+            "file_name": "",
+        }
+
+    return {
+        "duration_ms": duration_ms,
+        "src": src,
+        "local_path": local_path,
+        "transcript": transcript,
+        "file_name": os.path.basename(local_path) if local_path else "",
+    }
+
+
+def _mark_ding_messages(messages):
+    for idx, msg in enumerate(messages):
+        if msg.get("message_subtype") != "ding_status":
+            continue
+        if "你的DING" not in (msg.get("text") or ""):
+            continue
+        candidates = []
+        for prev in range(idx - 1, -1, -1):
+            candidate = messages[prev]
+            if candidate.get("cid") != msg.get("cid"):
+                continue
+            if msg.get("created_at", 0) - candidate.get("created_at", 0) > 15 * 60 * 1000:
+                break
+            if str(candidate.get("sender_id")) != str(config.USER_UID):
+                continue
+            if candidate.get("message_subtype") == "ding_status":
+                continue
+            candidates.append(candidate)
+        if candidates:
+            candidates[-1]["is_ding"] = True
 
 
 def search_messages(conn, keyword, limit=50, offset=0):
@@ -720,9 +1131,110 @@ def _extract_rich_text(content_data):
     return ""
 
 
+def _extract_reply_info(content_data, row_extension_data, conn):
+    attachments = content_data.get("attachments", [])
+    if not isinstance(attachments, list):
+        return None
+
+    reply_ext = {}
+    markdown_ext = {}
+    for att in attachments:
+        if not isinstance(att, dict):
+            continue
+        ext = att.get("extension", {})
+        if isinstance(ext, str):
+            try:
+                ext = json.loads(ext)
+            except json.JSONDecodeError:
+                ext = {}
+        if not isinstance(ext, dict):
+            continue
+        if ext.get("sourceMessageModel") or ext.get("replyContent"):
+            reply_ext = ext
+        if ext.get("markdown"):
+            markdown_ext = ext
+
+    if not reply_ext and not markdown_ext:
+        return None
+
+    source_sender_name = ""
+    source_sender_id = row_extension_data.get("sourceSenderId")
+    if source_sender_id:
+        source_user = get_user_profile(conn, int(source_sender_id))
+        if source_user:
+            source_sender_name = (
+                source_user.get("real_name") or source_user.get("nick") or str(source_sender_id)
+            )
+    if not source_sender_name:
+        source_sender_name = _extract_markdown_source_sender(markdown_ext.get("markdown", ""))
+
+    reply_text = (reply_ext.get("replyContent") or markdown_ext.get("title") or "").strip()
+    source_preview = ""
+    source_model = _parse_json_dict(reply_ext.get("sourceMessageModel"))
+    if source_model:
+        source_preview = _render_source_message_text(source_model)
+    if not source_preview:
+        source_preview = _extract_markdown_source_preview(markdown_ext.get("markdown", ""))
+
+    return {
+        "source_sender_name": source_sender_name,
+        "source_preview": source_preview,
+        "reply_text": reply_text,
+    }
+
+
+def _extract_markdown_source_sender(markdown):
+    if not markdown:
+        return ""
+    match = re.search(r"^> ######\s+(.+)$", markdown, re.MULTILINE)
+    return match.group(1).strip() if match else ""
+
+
+def _extract_markdown_source_preview(markdown):
+    if not markdown:
+        return ""
+    lines = markdown.splitlines()
+    preview_lines = []
+    in_reply = False
+    for line in lines:
+        if line.startswith("---------------"):
+            in_reply = True
+            continue
+        if in_reply:
+            continue
+        if line.startswith("> ###### "):
+            continue
+        if line.startswith("> "):
+            preview_lines.append(line[2:].strip())
+    return "\n".join(line for line in preview_lines if line).strip()
+
+
+def _render_source_message_text(source_model):
+    content = source_model.get("content", {}) or {}
+    content_type = content.get("contentType")
+    if content_type == 1:
+        text_content = content.get("textContent", {}) or {}
+        text = text_content.get("text") or content.get("text") or ""
+        at_open_ids = content.get("atOpenIds", {}) or {}
+        for uid, name in at_open_ids.items():
+            text = text.replace(f"@{uid}", f"@{name}")
+        return text.strip()
+    if content_type == 2:
+        return "[图片]"
+    if content_type == 3:
+        return "[语音消息]"
+    return ""
+
+
 def _extract_quote_text(content_data):
     """Extract text from quote/re-edit messages (contentType=3100)."""
     ext = _extract_ext_from_attachment(content_data)
+    payload_v2_text = _extract_dynamic_payload_v2_text(ext.get("payloadV2"))
+    if payload_v2_text:
+        return payload_v2_text
+    payload_text = _extract_dynamic_payload_text(ext.get("payload"))
+    if payload_text:
+        return payload_text
     if ext.get("desc"):
         return ext["desc"]
     if ext.get("title"):
@@ -731,9 +1243,129 @@ def _extract_quote_text(content_data):
     return content_data.get("text", "")
 
 
-def _extract_card_text(content_data):
+def _extract_dynamic_payload_v2_text(raw_payload):
+    payload = _parse_json_dict(raw_payload)
+    contents = payload.get("contents", [])
+    if not isinstance(contents, list):
+        return ""
+
+    pieces = []
+    for content in contents:
+        if not isinstance(content, dict):
+            continue
+        text_block = content.get("text", {})
+        if not isinstance(text_block, dict):
+            continue
+        items = text_block.get("items", [])
+        if not isinstance(items, list):
+            continue
+        block_parts = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            item_type = item.get("type")
+            data = item.get("data", {}) or {}
+            if item_type == "newLine":
+                block_parts.append("\n")
+            elif item_type == "image":
+                block_parts.append("[图片]")
+            elif item_type in ("text", "link"):
+                text = data.get("text", "")
+                if text:
+                    block_parts.append(str(text))
+        block_text = "".join(block_parts).strip()
+        if block_text:
+            pieces.append(block_text)
+    return "\n".join(pieces).strip()
+
+
+def _extract_dynamic_payload_text(raw_payload):
+    payload = _parse_json_dict(raw_payload)
+    items = payload.get("items", [])
+    if not isinstance(items, list):
+        return ""
+
+    lines = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item_type = item.get("type")
+        value = item.get("value", {}) or {}
+        if item_type == "img":
+            lines.append("[图片]")
+            continue
+        if item_type != "rt":
+            continue
+        text_runs = value.get("textRuns", [])
+        if not isinstance(text_runs, list):
+            continue
+        text = "".join(str(run.get("text", "")) for run in text_runs if isinstance(run, dict))
+        lines.append(text)
+    return "\n".join(lines).strip()
+
+
+def _extract_report_card_text(conn, content_data, row_extension_data):
+    base_text = _extract_card_text(content_data, row_extension_data)
+    report_id = _extract_report_id(row_extension_data)
+    if not report_id:
+        return base_text
+    full_text = _lookup_report_text_by_report_id(conn, report_id)
+    if full_text:
+        return full_text
+    return base_text
+
+
+def _extract_report_id(row_extension_data):
+    report_id = (row_extension_data.get("reportId") or "").strip()
+    if report_id:
+        return report_id
+    action_url = row_extension_data.get("biz_custom_action_url", "") or row_extension_data.get("apn_nav_url", "")
+    if not action_url:
+        return ""
+    decoded = unquote(action_url)
+    parsed = urlparse(decoded)
+    params = parse_qs(parsed.query)
+    if "id" in params and params["id"]:
+        return params["id"][0]
+    if "url=" in decoded:
+        nested = decoded.split("url=", 1)[1].split("&", 1)[0]
+        nested = unquote(nested)
+        nested_parsed = urlparse(nested)
+        nested_params = parse_qs(nested_parsed.query)
+        if "id" in nested_params and nested_params["id"]:
+            return nested_params["id"][0]
+    return ""
+
+
+def _lookup_report_text_by_report_id(conn, report_id):
+    for table in _get_all_msg_tables():
+        try:
+            row = conn.execute(
+                f'''SELECT content FROM "{table}" WHERE content LIKE ? LIMIT 1''',
+                (f"%{report_id}%",),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            continue
+        if not row:
+            continue
+        content_data = _parse_json_dict(row["content"])
+        report_text = _extract_report_text(content_data)
+        if report_text:
+            return report_text
+    return ""
+
+
+def _extract_card_text(content_data, row_extension_data=None):
     """Extract text from interactive card / mini-app card messages (contentType=2900/2950)."""
+    row_extension_data = row_extension_data or {}
     ext = _extract_ext_from_attachment(content_data)
+    biz_title = _clean_card_title(row_extension_data.get("biz_custom_title", ""))
+    biz_desc = row_extension_data.get("biz_custom_desc", "")
+    if biz_title:
+        pieces = [biz_title]
+        if biz_desc:
+            pieces.append(biz_desc.strip())
+        return "\n".join(piece for piece in pieces if piece).strip()
     # Priority: searchDesc > LastMessageI18n > interactiveCardLastMessage > title
     if ext.get("searchDesc"):
         return ext["searchDesc"]
@@ -752,6 +1384,34 @@ def _extract_card_text(content_data):
     if ext.get("title"):
         return ext["title"]
     return ""
+
+
+def _detect_card_subtype(content_data, row_extension_data):
+    if row_extension_data.get("BIType") == "group_plug_vote":
+        return "vote"
+    ext = _extract_ext_from_attachment(content_data)
+    last_message = (
+        row_extension_data.get("interactiveCardLastMessage")
+        or ext.get("interactiveCardLastMessage")
+        or ""
+    )
+    combined_text = " ".join(
+        str(value)
+        for value in (
+            row_extension_data.get("msgSrcBizId", ""),
+            row_extension_data.get("biz_custom_action_name", ""),
+            row_extension_data.get("biz_custom_title", ""),
+            last_message,
+        )
+        if value
+    )
+    if "投票" in last_message:
+        return "vote"
+    if any(keyword in combined_text for keyword in ("日志", "日报", "周报", "月报")):
+        return "report"
+    if row_extension_data.get("reportId") or row_extension_data.get("lippiReport"):
+        return "report"
+    return "card"
 
 
 def _extract_approval_text(content_data):

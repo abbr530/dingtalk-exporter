@@ -97,6 +97,58 @@ function formatMarkdown(text) {
     return html;
 }
 
+function formatPlainMultiline(text) {
+    if (!text) return '';
+    return escapeHtml(text).replace(/\n/g, '<br>');
+}
+
+function clampText(text, maxLength = 800) {
+    if (!text) return '';
+    return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text;
+}
+
+function formatDuration(ms) {
+    const totalSeconds = Math.max(0, Math.round((ms || 0) / 1000));
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = String(totalSeconds % 60).padStart(2, '0');
+    return `${minutes}:${seconds}`;
+}
+
+function renderAudioMessage(msg) {
+    const audio = msg.audio_info || {};
+    const player = audio.src
+        ? `<audio class="msg-audio-player" controls preload="none" src="${audio.src}"></audio>`
+        : `<div class="msg-image-placeholder">[语音文件未缓存到本地]</div>`;
+    const transcript = msg.text && msg.text !== '[语音消息]'
+        ? `<div class="msg-audio-transcript">${formatPlainMultiline(clampText(msg.text, 1200))}</div>`
+        : '';
+    const meta = [];
+    if (audio.duration_ms) meta.push(formatDuration(audio.duration_ms));
+    if (audio.file_name) meta.push(escapeHtml(audio.file_name));
+    const metaHtml = meta.length > 0 ? `<div class="msg-audio-meta">${meta.join(' · ')}</div>` : '';
+    return `<div class="msg-audio">${player}${metaHtml}${transcript}</div>`;
+}
+
+function renderReplyMessage(msg) {
+    const quote = msg.quote_info || {};
+    const sourceName = quote.source_sender_name ? escapeHtml(quote.source_sender_name) : '原消息';
+    const sourcePreview = quote.source_preview
+        ? formatPlainMultiline(clampText(quote.source_preview, 300))
+        : '[原消息]';
+    const replyText = msg.text
+        ? formatPlainMultiline(clampText(msg.text, 1200))
+        : '[引用消息]';
+    return `
+        <div class="msg-reply">
+            <div class="msg-reply-source">
+                <div class="msg-reply-name">${sourceName}</div>
+                <div class="msg-reply-preview">${sourcePreview}</div>
+            </div>
+            <div class="msg-reply-body">${replyText}</div>
+        </div>
+    `;
+}
+
 // --- Conversations ---
 let _convTotal = 0;       // total from API
 let _convLoading = false; // prevent duplicate loads
@@ -265,7 +317,7 @@ function renderMessages(messages) {
         // Render based on content type
         switch (msg.content_type) {
             case 1: // Text
-                contentHtml = escapeHtml(msg.text);
+                contentHtml = formatPlainMultiline(msg.text);
                 // Highlight @mentions
                 if (msg.at_ids && Object.keys(msg.at_ids).length > 0) {
                     for (const [uid, name] of Object.entries(msg.at_ids)) {
@@ -280,13 +332,29 @@ function renderMessages(messages) {
                 const imgInfo = msg.image_info || {};
                 const imgSrc = imgInfo.src;
                 if (imgSrc) {
-                    contentHtml = '<a href="' + imgSrc + '" target="_blank"><img class="msg-image" src="' + imgSrc + '" alt="图片" style="max-width:100%;cursor:pointer"></a>';
+                    const label = msg.message_subtype === 'emoji' ? '表情包' : '图片';
+                    contentHtml = '<a href="' + imgSrc + '" target="_blank"><img class="msg-image" src="' + imgSrc + '" alt="' + label + '" style="max-width:100%;cursor:pointer"></a>';
                 } else {
                     contentHtml = '<div class="msg-image-placeholder">[图片未缓存到本地]</div>';
                 }
                 break;
+            case 3:
+                contentHtml = renderAudioMessage(msg);
+                break;
             case 300: // Voice
-                contentHtml = '[语音消息]';
+                if (msg.message_subtype === 'announcement' && msg.text) {
+                    contentHtml = `<div class="msg-card">${formatPlainMultiline(msg.text)}</div>`;
+                } else if (msg.message_subtype === 'report' && msg.text) {
+                    contentHtml = `<div class="msg-card">${formatPlainMultiline(clampText(msg.text, 1600))}</div>`;
+                } else {
+                    contentHtml = '[语音消息]';
+                }
+                break;
+            case 102:
+            case 104:
+                contentHtml = msg.text ?
+                    `<div class="msg-card">${formatPlainMultiline(clampText(msg.text, 800))}</div>` :
+                    `[${msg.content_type_name || '系统消息'}]`;
                 break;
             case 501: // File
                 const fileAtt = (msg.attachments || []).find(a => a.filename);
@@ -314,14 +382,18 @@ function renderMessages(messages) {
             case 2900:
             case 2950: // Interactive cards
                 contentHtml = msg.text ?
-                    `<div class="msg-card">${escapeHtml(msg.text).substring(0, 500)}</div>` :
+                    `<div class="msg-card">${formatPlainMultiline(clampText(msg.text, msg.message_subtype === 'report' ? 1600 : 800))}</div>` :
                     '[互动卡片]';
                 break;
             case 3100: // Quote
             case 1200: // Rich text
             case 1201:
             case 1202:
-                let quoteText = msg.text ? escapeHtml(msg.text).substring(0, 500) : '';
+                if (msg.message_subtype === 'reply' && msg.quote_info) {
+                    contentHtml = renderReplyMessage(msg);
+                    break;
+                }
+                let quoteText = msg.text ? formatPlainMultiline(msg.text) : '';
                 // Replace [图片] with actual images from image_info
                 const quoteImgInfo = msg.image_info || {};
                 const quoteImgs = quoteImgInfo.images || [];
@@ -347,12 +419,14 @@ function renderMessages(messages) {
                 }
                 break;
             default:
-                contentHtml = msg.text ? escapeHtml(msg.text) : `[${msg.content_type_name || '消息'}]`;
+                contentHtml = msg.text ? formatPlainMultiline(msg.text) : `[${msg.content_type_name || '消息'}]`;
         }
+
+        const dingBadge = msg.is_ding ? '<span class="msg-ding-badge">DING</span>' : '';
 
         html += `
             <div class="msg-item ${isSelf ? 'self' : ''}">
-                <div class="msg-sender">${escapeHtml(msg.sender_name)}</div>
+                <div class="msg-sender">${escapeHtml(msg.sender_name)}${dingBadge}</div>
                 <div class="msg-bubble">${contentHtml}</div>
                 <div class="msg-time">${msg.created_at_str || formatTime(msg.created_at)}</div>
             </div>
@@ -454,7 +528,7 @@ async function doSearch() {
                 ${escapeHtml(msg.sender_name)}
                 <span style="margin-left:8px;font-size:11px;color:#999">${msg.created_at_str}</span>
             </div>
-            <div class="msg-bubble">${highlightSearch(escapeHtml(msg.text), query)}</div>
+            <div class="msg-bubble">${highlightSearch(formatPlainMultiline(msg.text), query)}</div>
         </div>
     `).join('');
 }
