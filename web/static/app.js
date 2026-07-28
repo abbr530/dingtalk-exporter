@@ -873,15 +873,68 @@ function init() {
     const customTimeRangeEl = document.getElementById('customTimeRange');
     const sinceTimeEl = document.getElementById('sinceTime');
     const untilTimeEl = document.getElementById('untilTime');
+    const timeRangePreviewEl = document.getElementById('timeRangePreview');
 
     function toggleCustomTimeRange() {
-        customTimeRangeEl.style.display = exportTimeRangeEl.value === '999' ? 'flex' : 'none';
+        const isCustom = exportTimeRangeEl.value === '999';
+        customTimeRangeEl.hidden = !isCustom;
+        if (isCustom && !sinceTimeEl.value) {
+            const now = new Date();
+            const oneMonthAgo = new Date(now);
+            oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
+            sinceTimeEl.value = formatDatetimeLocal(oneMonthAgo);
+            untilTimeEl.value = formatDatetimeLocal(now);
+        }
+        updateRangePreview();
+    }
+
+    function formatDatetimeLocal(date) {
+        const y = date.getFullYear();
+        const m = String(date.getMonth() + 1).padStart(2, '0');
+        const d = String(date.getDate()).padStart(2, '0');
+        const hh = String(date.getHours()).padStart(2, '0');
+        const mm = String(date.getMinutes()).padStart(2, '0');
+        return `${y}-${m}-${d}T${hh}:${mm}`;
     }
 
     function toTimestampMs(value) {
         if (!value) return null;
         const ts = new Date(value).getTime();
         return Number.isNaN(ts) ? null : ts;
+    }
+
+    function formatDate(ts) {
+        const d = new Date(ts);
+        return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+    }
+
+    function updateRangePreview() {
+        const v = exportTimeRangeEl.value;
+        if (v === '0') {
+            timeRangePreviewEl.textContent = '';
+            return;
+        }
+        if (v === '999') {
+            const s = toTimestampMs(sinceTimeEl.value);
+            const e = toTimestampMs(untilTimeEl.value);
+            if (s && e) {
+                timeRangePreviewEl.textContent = `${formatDate(s)} ~ ${formatDate(e)}`;
+            } else {
+                timeRangePreviewEl.textContent = '';
+            }
+            return;
+        }
+        const now = Date.now();
+        let since;
+        if (v === '1w') {
+            since = now - 7 * 24 * 3600 * 1000;
+        } else if (v === '1') {
+            since = now - 30 * 24 * 3600 * 1000;
+        } else {
+            const months = parseInt(v, 10);
+            since = now - months * 30 * 24 * 3600 * 1000;
+        }
+        timeRangePreviewEl.textContent = `${formatDate(since)} ~ ${formatDate(now)}`;
     }
 
     async function pollExportCompletion(btn) {
@@ -903,6 +956,8 @@ function init() {
     }
 
     exportTimeRangeEl.addEventListener('change', toggleCustomTimeRange);
+    sinceTimeEl.addEventListener('change', updateRangePreview);
+    untilTimeEl.addEventListener('change', updateRangePreview);
     toggleCustomTimeRange();
 
     // Export selected conversations
@@ -919,9 +974,15 @@ function init() {
         let untilTime = null;
 
         if (rangeValue !== '999') {
-            const months = parseInt(rangeValue, 10);
-            if (months > 0) {
-                sinceTime = Date.now() - months * 30 * 24 * 3600 * 1000;
+            if (rangeValue === '1w') {
+                sinceTime = Date.now() - 7 * 24 * 3600 * 1000;
+            } else if (rangeValue === '1') {
+                sinceTime = Date.now() - 30 * 24 * 3600 * 1000;
+            } else {
+                const months = parseInt(rangeValue, 10);
+                if (months > 0) {
+                    sinceTime = Date.now() - months * 30 * 24 * 3600 * 1000;
+                }
             }
         } else {
             sinceTime = toTimestampMs(sinceTimeEl.value);
