@@ -681,22 +681,26 @@ async function loadExportConvList(keyword) {
     const el = document.getElementById('exportConvList');
     el.innerHTML = '<div class="loading">加载会话列表...</div>';
 
-    // Fetch all conversations (paginated)
-    let all = [];
-    let offset = 0;
-    const limit = 200;
-    while (true) {
-        let url = `/api/conversations?limit=${limit}&offset=${offset}`;
-        const data = await apiGet(url);
-        all = all.concat(data.conversations);
-        if (all.length >= data.total) break;
-        offset += limit;
+    try {
+        // Fetch all conversations (paginated)
+        let all = [];
+        let offset = 0;
+        const limit = 200;
+        while (true) {
+            let url = `/api/conversations?limit=${limit}&offset=${offset}`;
+            const data = await apiGet(url);
+            all = all.concat(data.conversations);
+            if (all.length >= data.total) break;
+            offset += limit;
+        }
+
+        _exportAllConvs = all;
+
+        // Restore previous selections
+        renderExportConvList(keyword || '');
+    } catch (e) {
+        el.innerHTML = `<div style="padding:20px;color:#d64545">加载会话列表失败: ${escapeHtml(e.message)}</div>`;
     }
-
-    _exportAllConvs = all;
-
-    // Restore previous selections
-    renderExportConvList(keyword || '');
 }
 
 function renderExportConvList(keyword) {
@@ -909,6 +913,9 @@ function init() {
     }
 
     function updateRangePreview() {
+        if (!timeRangePreviewEl) {
+            return;
+        }
         const v = exportTimeRangeEl.value;
         if (v === '0') {
             timeRangePreviewEl.textContent = '';
@@ -945,6 +952,10 @@ function init() {
                     clearInterval(poll);
                     btn.disabled = false;
                     btn.textContent = '导出选中会话';
+                    if (s.last_error) {
+                        alert('导出失败: ' + s.last_error);
+                        return;
+                    }
                     document.querySelectorAll('.export-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === 'files'));
                     document.getElementById('exportPanelSelect').style.display = 'none';
                     document.getElementById('exportPanelFiles').style.display = '';
@@ -1004,11 +1015,16 @@ function init() {
         }
 
         try {
-            await fetch('/api/export/selected', {
+            const resp = await fetch('/api/export/selected', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({cids, since_time: sinceTime, until_time: untilTime}),
             });
+
+            if (!resp.ok) {
+                const data = await resp.json().catch(() => ({}));
+                throw new Error(data.detail || `HTTP ${resp.status}`);
+            }
 
             pollExportCompletion(btn);
         } catch (e) {
