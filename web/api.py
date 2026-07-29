@@ -82,7 +82,11 @@ async def shutdown():
 
 # --- Static files ---
 
-STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+if getattr(sys, 'frozen', False):
+    # PyInstaller: static files are in the temp extraction directory
+    STATIC_DIR = os.path.join(sys._MEIPASS, 'web', 'static') if hasattr(sys, '_MEIPASS') else os.path.join(os.path.dirname(sys.executable), 'web', 'static')
+else:
+    STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
 
 @app.get("/", response_class=HTMLResponse)
