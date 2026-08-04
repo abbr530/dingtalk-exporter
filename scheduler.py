@@ -42,6 +42,12 @@ def _load_state():
         except (json.JSONDecodeError, IOError) as e:
             log_event(logger, "warning", "scheduler.state_load_failed", path=config.SYNC_STATE_FILE, error=e)
 
+    # A freshly started process can never be mid-sync; clear any stale
+    # is_syncing flag left behind by a crashed or killed process.
+    if _sync_state.get("is_syncing"):
+        _sync_state["is_syncing"] = False
+        log_event(logger, "info", "scheduler.stale_sync_flag_cleared")
+
 
 def _save_state():
     """Save sync state to file."""
