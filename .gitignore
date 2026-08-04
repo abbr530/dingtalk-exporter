@@ -13,11 +13,6 @@ tools/dingwave.exe
 tools/dingwave
 tools/dingwave_*
 
-# PyInstaller build output
-build/
-dist/
-*.spec.bak
-
 # Environment
 .env
 .venv/

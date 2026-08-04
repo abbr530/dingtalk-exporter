@@ -5,11 +5,7 @@ import sys
 from datetime import datetime
 from log_utils import log_event
 
-# Handle PyInstaller frozen app
-if getattr(sys, 'frozen', False):
-    PROJECT_DIR = os.path.dirname(sys.executable)
-else:
-    PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 logger = logging.getLogger(__name__)
 
@@ -423,8 +419,8 @@ def _detect_dingwave():
     Checks multiple possible filenames to handle:
     - Platform differences (dingwave.exe vs dingwave)
     - Users who rename or download with different names
-    - PyInstaller frozen app (tools bundled in temp dir or next to EXE)
     """
+    tools_dir = os.path.join(PROJECT_DIR, "tools")
     candidates = []
 
     if sys.platform == "win32":
@@ -432,48 +428,24 @@ def _detect_dingwave():
     else:
         candidates = ["dingwave", "dingwave.exe"]
 
-    # Check multiple possible locations
-    search_dirs = []
+    # Check exact names first
+    for name in candidates:
+        full = os.path.join(tools_dir, name)
+        if os.path.isfile(full):
+            return full
 
-    # 1. Next to the EXE (user can place tools/ there)
-    search_dirs.append(os.path.join(PROJECT_DIR, "tools"))
-
-    # 2. In the frozen app's temp directory (bundled by PyInstaller)
-    if getattr(sys, 'frozen', False):
-        frozen_dir = os.path.dirname(sys.executable)
-        search_dirs.append(os.path.join(frozen_dir, "tools"))
-        # Also check _MEIPASS for onedir bundles
-        if hasattr(sys, '_MEIPASS'):
-            search_dirs.append(os.path.join(sys._MEIPASS, "tools"))
-
-    # Deduplicate
-    seen = set()
-    unique_dirs = []
-    for d in search_dirs:
-        d_norm = os.path.normcase(os.path.normpath(d))
-        if d_norm not in seen:
-            seen.add(d_norm)
-            unique_dirs.append(d)
-
-    for tools_dir in unique_dirs:
-        # Check exact names first
-        for name in candidates:
-            full = os.path.join(tools_dir, name)
-            if os.path.isfile(full):
-                return full
-
-        # Fallback: find any executable-like file in tools/ with 'dingwave' in name
-        if os.path.isdir(tools_dir):
-            for f in os.listdir(tools_dir):
-                lower = f.lower()
-                if "dingwave" in lower and not lower.endswith((".md", ".txt", ".zip", ".tar", ".gz")):
-                    full = os.path.join(tools_dir, f)
-                    if os.path.isfile(full):
-                        log_event(logger, "info", "config.dingwave_detected", path=full, filename=f)
-                        return full
+    # Fallback: find any executable-like file in tools/ with 'dingwave' in name
+    if os.path.isdir(tools_dir):
+        for f in os.listdir(tools_dir):
+            lower = f.lower()
+            if "dingwave" in lower and not lower.endswith((".md", ".txt", ".zip", ".tar", ".gz")):
+                full = os.path.join(tools_dir, f)
+                if os.path.isfile(full):
+                    log_event(logger, "info", "config.dingwave_detected", path=full, filename=f)
+                    return full
 
     # Return default (will fail later with clear message)
-    return os.path.join(search_dirs[0] if search_dirs else os.path.join(PROJECT_DIR, "tools"), candidates[0])
+    return os.path.join(tools_dir, candidates[0])
 
 
 # --- DingTalk data paths ---
