@@ -123,12 +123,58 @@ export_20260417_191234/
 
 此格式专为 AI 工具设计 — `content` 字段提供统一可读字符串，附件路径为相对路径。
 
+## MCP Server（AI 工具接入）
+
+本工具内置 MCP（Model Context Protocol）服务，AI 客户端（Claude Desktop / Cursor / WorkBuddy 等）可直接查询本机聊天记录，无需写代码。
+
+### 快速配置（stdio，推荐）
+
+在 Claude Desktop 的 `claude_desktop_config.json`（或 Cursor 的 MCP 配置）中添加：
+
+```json
+{
+  "mcpServers": {
+    "dingtalk-exporter": {
+      "command": "python",
+      "args": ["D:\\路径\\dingtalk-exporter\\mcp_server.py"]
+    }
+  }
+}
+```
+
+> 建议使用虚拟环境中的 Python：`D:\\路径\\dingtalk-exporter\\.venv\\Scripts\\python.exe`
+
+### 远程访问（streamable HTTP）
+
+```bash
+python mcp_server.py --http --host 127.0.0.1 --port 8091
+```
+
+客户端连接 `http://127.0.0.1:8091/mcp/`。注意：聊天记录为个人私密数据，`--host` 默认仅绑定本机，请勿暴露到外网。
+
+### 可用工具
+
+| 工具 | 说明 |
+|------|------|
+| `list_conversations` | 会话列表（按名称过滤、分页） |
+| `get_messages` | 读取指定会话消息（支持时间范围） |
+| `search_messages` | 跨全部会话全文搜索 |
+| `get_stats` | 会话/消息统计 |
+| `get_database_status` | 解密数据库就绪状态 |
+| `get_sync_status` | 同步进度、上次导出路径 |
+| `trigger_sync` | 触发同步（首次使用前必须先同步） |
+| `export_conversations` | 导出会话为 JSON + 附件 |
+| `read_attachment` | 读取本地附件/导出文件内容给模型 |
+
+> **首次使用**：调用 `trigger_sync` 完成首次解密同步（可能耗时数分钟），再查询。导出类工具在后台执行，可通过 `get_sync_status` 查看完成状态。
+
 ## 项目结构
 
 ```
 dingtalk-exporter/
 ├── config.py          # 配置（自动检测 + 路径、常量）
 ├── main.py            # 入口文件（uvicorn 服务器）
+├── mcp_server.py      # MCP server（stdio / HTTP，AI 客户端接入）
 ├── decrypt.py         # 数据库解密（复制 DB/WAL + 快照校验/回退）
 ├── parser.py          # 消息解析（SQLite → 结构化数据）
 ├── exporter.py        # 导出为 JSON + 附件打包
