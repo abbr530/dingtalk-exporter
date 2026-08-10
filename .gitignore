@@ -9,9 +9,12 @@ __pycache__/
 *.egg-info/
 
 # dingwave binary — download from https://github.com/p1g3/dingwave/releases
-tools/dingwave.exe
-tools/dingwave
-tools/dingwave_*
+tools/dingwave*
+
+# PyInstaller build output
+build/
+dist/
+*.spec.bak
 
 # Environment
 .env

@@ -3,6 +3,7 @@ import shutil
 import logging
 
 import config
+from log_utils import log_event
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +70,14 @@ def copy_attachment_to_export(src_path, export_path):
         shutil.copy2(src_path, export_path)
         return True
     except (OSError, shutil.Error) as e:
-        logger.warning(f"Failed to copy attachment {src_path}: {e}")
+        log_event(
+            logger,
+            "warning",
+            "attachment.copy_failed",
+            source_path=src_path,
+            export_path=export_path,
+            error=e,
+        )
         return False
 
 
@@ -155,10 +163,14 @@ def process_all_attachments(messages, export_dir):
             else:
                 stats["errors"] += 1
 
-    logger.info(
-        f"Attachment export stats: {stats['images']} images, "
-        f"{stats['files']} files, {stats['skipped']} skipped, "
-        f"{stats['errors']} errors"
+    log_event(
+        logger,
+        "info",
+        "attachment.processed",
+        image_count=stats["images"],
+        file_count=stats["files"],
+        skipped_count=stats["skipped"],
+        error_count=stats["errors"],
     )
     return stats
 
